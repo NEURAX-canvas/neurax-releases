@@ -1,0 +1,515 @@
+#!/bin/sh
+#
+# NEURAX installer — Linux and macOS.
+#
+#   curl -fsSL https://raw.githubusercontent.com/NEURAX-canvas/neurax-releases/main/install.sh | sh
+#
+# Installs the desktop application and makes `neurax` available in the shell.
+# Nothing is written outside your home directory unless you ask for it, and no
+# step runs under sudo.
+#
+# Options (pass after `| sh -s --`):
+#   --version <tag>   install a specific release instead of the newest
+#   --prefix <dir>    install somewhere other than ~/.local
+#   --uninstall       remove what this script installed
+#   --help
+#
+# POSIX sh on purpose: this has to run under dash on Debian, bash on most
+# distributions, and zsh on macOS, on a machine where nothing has been set up
+# yet.
+
+set -eu
+
+# Installers are published here, in a repository that holds no source: the
+# NEURAX source repository is private, so neither its releases nor a raw URL
+# into it can be reached by anyone installing.
+REPO="NEURAX-canvas/neurax-releases"
+API="https://api.github.com/repos/${REPO}"
+
+PREFIX="${NEURAX_PREFIX:-${HOME}/.local}"
+VERSION=""
+UNINSTALL=0
+
+# ─── Output ─────────────────────────────────────────────────────────
+
+# Colour only when stdout is a terminal; piped into a log it would be noise.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    BOLD=$(printf '\033[1m'); DIM=$(printf '\033[2m')
+    RED=$(printf '\033[31m'); GREEN=$(printf '\033[32m')
+    YELLOW=$(printf '\033[33m'); RESET=$(printf '\033[0m')
+    GOLD=$(printf '\033[38;5;178m')
+else
+    BOLD=''; DIM=''; RED=''; GREEN=''; YELLOW=''; RESET=''; GOLD=''
+fi
+
+say()  { printf '%s\n' "$*"; }
+step() { printf '%s==>%s %s\n' "${BOLD}" "${RESET}" "$*"; }
+note() { printf '    %s%s%s\n' "${DIM}" "$*" "${RESET}"; }
+warn() { printf '%swarning:%s %s\n' "${YELLOW}" "${RESET}" "$*" >&2; }
+die()  { printf '%serror:%s %s\n' "${RED}" "${RESET}" "$*" >&2; exit 1; }
+
+usage() {
+    sed -n '3,20p' "$0" | sed 's/^#\{0,1\} \{0,1\}//'
+    exit 0
+}
+
+# ─── Arguments ──────────────────────────────────────────────────────
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --version) VERSION="${2:?--version needs a tag}"; shift 2 ;;
+        --prefix)  PREFIX="${2:?--prefix needs a directory}"; shift 2 ;;
+        --uninstall) UNINSTALL=1; shift ;;
+        --help|-h) usage ;;
+        *) die "unknown option: $1 (try --help)" ;;
+    esac
+done
+
+BIN_DIR="${PREFIX}/bin"
+APP_DIR="${PREFIX}/lib/neurax"
+DESKTOP_ENTRY="${HOME}/.local/share/applications/neurax.desktop"
+ICON_ROOT="${HOME}/.local/share/icons/hicolor"
+MAC_APP="/Applications/NEURAX.app"
+MAC_APP_USER="${HOME}/Applications/NEURAX.app"
+
+# ─── Platform ───────────────────────────────────────────────────────
+
+detect_platform() {
+    os=$(uname -s)
+    arch=$(uname -m)
+
+    case "${os}" in
+        Linux)  PLATFORM=linux ;;
+        Darwin) PLATFORM=macos ;;
+        *) die "NEURAX has no prebuilt build for ${os} yet. Open an issue: https://github.com/${REPO}/issues" ;;
+    esac
+
+    case "${arch}" in
+        x86_64|amd64)  ARCH=x86_64 ;;
+        arm64|aarch64) ARCH=arm64 ;;
+        *) die "unsupported architecture: ${arch}" ;;
+    esac
+
+    # The macOS bundle is universal, so one file serves both architectures.
+    # The Linux bundle is built on an x86_64 runner only.
+    if [ "${PLATFORM}" = linux ] && [ "${ARCH}" = arm64 ]; then
+        die "no prebuilt Linux arm64 bundle yet. Open an issue: https://github.com/${REPO}/issues"
+    fi
+}
+
+need() {
+    command -v "$1" >/dev/null 2>&1 || die "this installer needs \`$1\`, which is not installed."
+}
+
+# ─── Downloading ────────────────────────────────────────────────────
+
+fetch() {
+    # -f so an HTML error page is never mistaken for a payload.
+    curl -fsSL "$1"
+}
+
+fetch_to() {
+    curl -fL --progress-bar "$1" -o "$2"
+}
+
+# Extract the browser_download_url of the first asset matching a suffix.
+#
+# Written against the raw JSON rather than jq, which is not installed by
+# default anywhere this has to run.
+asset_url_from() {
+    json="$1"; suffix="$2"
+    printf '%s' "${json}" \
+        | tr ',{' '\n\n' \
+        | grep '"browser_download_url"' \
+        | sed 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' \
+        | grep -- "${suffix}\$" \
+        | head -n 1
+}
+
+# Find a release that actually carries a bundle for this platform.
+#
+# Deliberately not `/releases/latest`: this repository has tags that predate
+# the desktop application, and the newest release is not necessarily one that
+# published installers. So walk the releases newest-first and take the first
+# that has the asset we need.
+# Look for a release carrying `suffix`, without failing if there is none.
+#
+# Sets ASSET_URL and RELEASE_TAG and returns 0 on success; returns 1 otherwise,
+# so the caller can try another format.
+#
+# Deliberately not `/releases/latest`: this repository has tags that predate the
+# desktop application, and the newest release is not necessarily one that
+# published installers. So walk the releases newest-first and take the first
+# that actually has the asset.
+resolve_release_quietly() {
+    suffix="$1"
+    ASSET_URL=""
+    RELEASE_TAG=""
+
+    if [ -n "${VERSION}" ]; then
+        release_json=$(fetch "${API}/releases/tags/${VERSION}") || return 1
+        ASSET_URL=$(asset_url_from "${release_json}" "${suffix}")
+        [ -n "${ASSET_URL}" ] || return 1
+        RELEASE_TAG="${VERSION}"
+        return 0
+    fi
+
+    # Fetched once and reused across the formats this is called with.
+    if [ -z "${RELEASES_JSON:-}" ]; then
+        step "Finding the newest NEURAX release for ${PLATFORM}"
+        RELEASES_JSON=$(fetch "${API}/releases?per_page=30") \
+            || die "could not reach the GitHub API. Are you online?"
+    fi
+
+    for tag in $(printf '%s' "${RELEASES_JSON}" \
+                    | tr ',' '\n' \
+                    | grep '"tag_name"' \
+                    | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/'); do
+        one=$(fetch "${API}/releases/tags/${tag}") || continue
+        url=$(asset_url_from "${one}" "${suffix}")
+        if [ -n "${url}" ]; then
+            ASSET_URL="${url}"
+            RELEASE_TAG="${tag}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+no_release_error() {
+    die "no published release contains $1 yet.
+
+Check back shortly, or open an issue: https://github.com/${REPO}/issues"
+}
+
+# ─── Install: Linux ─────────────────────────────────────────────────
+
+install_linux() {
+    need curl
+
+    # Preference order, and why. The AppImage is one self-contained file that
+    # needs no package manager and no root, so it is tried first. But its build
+    # depends on tooling downloaded at bundle time, which does fail — a 503 from
+    # a raw.githubusercontent.com URL is enough to produce a release with a .deb
+    # and an .rpm and no AppImage. Falling back to unpacking one of those into
+    # $HOME keeps the install working and still never asks for a password.
+    for suffix in ".AppImage" ".deb" ".rpm"; do
+        if resolve_release_quietly "${suffix}"; then
+            LINUX_KIND="${suffix}"
+            break
+        fi
+    done
+
+    if [ -z "${ASSET_URL:-}" ]; then
+        no_release_error "a Linux bundle"
+    fi
+
+    step "Installing NEURAX ${RELEASE_TAG}"
+    note "${ASSET_URL}"
+
+    mkdir -p "${APP_DIR}" "${BIN_DIR}"
+    tmp=$(mktemp -d)
+    # shellcheck disable=SC2064  # expand tmp now, not at exit
+    trap "rm -rf '${tmp}'" EXIT INT TERM
+
+    case "${LINUX_KIND}" in
+        .AppImage) install_linux_appimage "${tmp}" ;;
+        .deb)      install_linux_deb "${tmp}" ;;
+        .rpm)      install_linux_rpm "${tmp}" ;;
+    esac
+
+    install_launcher
+    install_desktop_entry
+}
+
+install_linux_appimage() {
+    tmp="$1"
+    fetch_to "${ASSET_URL}" "${tmp}/neurax.AppImage"
+    chmod +x "${tmp}/neurax.AppImage"
+    # Moved into place last, so an interrupted download never leaves a broken
+    # executable where a working one used to be.
+    mv -f "${tmp}/neurax.AppImage" "${APP_DIR}/neurax-desktop"
+    ln -sf "${APP_DIR}/neurax-desktop" "${BIN_DIR}/neurax-desktop"
+    check_fuse
+}
+
+# Unpack the package rather than installing it.
+#
+# `dpkg -i` and `rpm -i` both need root and both write to /usr. Unpacking gives
+# the same files under $HOME, which is all NEURAX needs: it is one binary and
+# its resources, with no system integration beyond the menu entry written
+# separately.
+install_linux_deb() {
+    tmp="$1"
+    fetch_to "${ASSET_URL}" "${tmp}/neurax.deb"
+
+    if command -v dpkg-deb >/dev/null 2>&1; then
+        dpkg-deb -x "${tmp}/neurax.deb" "${tmp}/root"
+    elif command -v ar >/dev/null 2>&1; then
+        (cd "${tmp}" && ar x neurax.deb && mkdir -p root && tar -xf data.tar.* -C root)
+    else
+        die "unpacking a .deb needs \`dpkg-deb\` or \`ar\`, and neither is installed."
+    fi
+
+    place_unpacked "${tmp}/root"
+}
+
+install_linux_rpm() {
+    tmp="$1"
+    fetch_to "${ASSET_URL}" "${tmp}/neurax.rpm"
+
+    command -v rpm2cpio >/dev/null 2>&1 || die "unpacking an .rpm needs \`rpm2cpio\`."
+    command -v cpio >/dev/null 2>&1 || die "unpacking an .rpm needs \`cpio\`."
+
+    mkdir -p "${tmp}/root"
+    (cd "${tmp}/root" && rpm2cpio "${tmp}/neurax.rpm" | cpio -idm --quiet)
+
+    place_unpacked "${tmp}/root"
+}
+
+# Move an unpacked package tree into place and expose its binary.
+place_unpacked() {
+    root="$1"
+
+    binary=$(find "${root}" -type f -name "neurax-desktop" -perm -u+x -print -quit)
+    [ -n "${binary}" ] || die "the package contained no neurax-desktop binary."
+
+    rm -rf "${APP_DIR}/files"
+    mkdir -p "${APP_DIR}/files"
+    # `usr` holds the binary, the icons and the desktop file; keeping the whole
+    # tree means the resources stay where the binary expects them.
+    cp -R "${root}/usr" "${APP_DIR}/files/" 2>/dev/null || cp -R "${root}/." "${APP_DIR}/files/"
+
+    installed=$(find "${APP_DIR}/files" -type f -name "neurax-desktop" -print -quit)
+    [ -n "${installed}" ] || die "could not place the binary."
+    chmod +x "${installed}"
+    ln -sf "${installed}" "${APP_DIR}/neurax-desktop"
+    ln -sf "${APP_DIR}/neurax-desktop" "${BIN_DIR}/neurax-desktop"
+}
+
+# An AppImage needs FUSE to mount itself. Most desktops have it; some minimal
+# installs and containers do not, and the failure message it produces is
+# obscure, so say it plainly up front.
+check_fuse() {
+    if ! command -v fusermount >/dev/null 2>&1 && ! command -v fusermount3 >/dev/null 2>&1; then
+        warn "FUSE was not found. AppImages need it to run."
+        note "Debian/Ubuntu:  sudo apt install libfuse2"
+        note "Fedora:         sudo dnf install fuse"
+        note "Or run it unpacked:  ${APP_DIR}/neurax-desktop --appimage-extract-and-run"
+    fi
+}
+
+install_desktop_entry() {
+    install_linux_icons
+    mkdir -p "$(dirname "${DESKTOP_ENTRY}")"
+    cat > "${DESKTOP_ENTRY}" <<ENTRY
+[Desktop Entry]
+Type=Application
+Name=NEURAX
+Comment=Analytical compiler for neural network architectures
+Exec=${APP_DIR}/neurax-desktop
+TryExec=${APP_DIR}/neurax-desktop
+Icon=neurax
+Terminal=false
+Categories=Development;Science;
+StartupWMClass=neurax-desktop
+X-GNOME-UsesNotifications=false
+ENTRY
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$(dirname "${DESKTOP_ENTRY}")" 2>/dev/null || true
+    fi
+    note "Added to your applications menu"
+}
+
+# AppImages are self-contained and the unpacked packages keep their payload
+# under ~/.local/lib/neurax, so neither one automatically exposes its icon to
+# the desktop shell. Install the same release artwork in the freedesktop icon
+# search path and use one stable name from the .desktop entry above.
+install_linux_icons() {
+    for size in 32 128 256; do
+        dir="${ICON_ROOT}/${size}x${size}/apps"
+        mkdir -p "${dir}"
+        source="${size}x${size}.png"
+        [ "${size}" = 256 ] && source="128x128@2x.png"
+        fetch_to "https://raw.githubusercontent.com/${REPO}/${RELEASE_TAG}/neurax-desktop/icons/${source}" "${dir}/neurax.png"
+    done
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -f -t "${ICON_ROOT}" 2>/dev/null || true
+    fi
+}
+
+# ─── Install: macOS ─────────────────────────────────────────────────
+
+install_macos() {
+    need curl
+    need hdiutil
+    resolve_release_quietly ".dmg" || no_release_error "a macOS disk image"
+
+    step "Installing NEURAX ${RELEASE_TAG}"
+    note "${ASSET_URL}"
+
+    tmp=$(mktemp -d)
+    mount_point="${tmp}/mnt"
+    # shellcheck disable=SC2064
+    trap "hdiutil detach '${mount_point}' -quiet 2>/dev/null || true; rm -rf '${tmp}'" EXIT INT TERM
+
+    fetch_to "${ASSET_URL}" "${tmp}/neurax.dmg"
+
+    mkdir -p "${mount_point}"
+    hdiutil attach "${tmp}/neurax.dmg" -mountpoint "${mount_point}" -nobrowse -quiet \
+        || die "could not open the disk image"
+
+    src=$(find "${mount_point}" -maxdepth 1 -name '*.app' -print -quit)
+    [ -n "${src}" ] || die "the disk image contains no application"
+
+    # /Applications when it is writable, the user's own otherwise. Never sudo:
+    # a script piped from the internet should not be asking for a password.
+    if [ -w /Applications ]; then
+        target="${MAC_APP}"
+    else
+        target="${MAC_APP_USER}"
+        mkdir -p "${HOME}/Applications"
+        note "/Applications is not writable — installing to ~/Applications"
+    fi
+
+    rm -rf "${target}"
+    cp -R "${src}" "${target}"
+
+    # The build is not notarized, so Gatekeeper would refuse to open it with a
+    # message that says the app is damaged. It is not damaged; it is unsigned.
+    # Clearing the quarantine flag on a bundle the user just chose to install
+    # is the same decision as right-clicking and picking Open.
+    xattr -dr com.apple.quarantine "${target}" 2>/dev/null || true
+
+    mkdir -p "${BIN_DIR}"
+    ln -sf "${target}/Contents/MacOS/neurax-desktop" "${BIN_DIR}/neurax-desktop"
+
+    install_launcher
+    note "Installed to ${target}"
+}
+
+# ─── The `neurax` command ───────────────────────────────────────────
+
+# Make `neurax` open the application.
+#
+# `neurax` is the application. There used to be a CLI compiler published under
+# the same name, so this stepped aside when it found one already installed;
+# that crate has been removed, and the only thing the name should now start is
+# the window.
+#
+# An older `neurax` may still be on the machine from `cargo install
+# neurax-cli`. It is left alone rather than overwritten — removing something
+# this script did not install is not this script's decision — but the user is
+# told, because otherwise the wrong one wins on PATH with no explanation.
+install_launcher() {
+    existing=$(command -v neurax 2>/dev/null || true)
+
+    if [ -n "${existing}" ] && [ "${existing}" != "${BIN_DIR}/neurax" ]; then
+        warn "\`neurax\` already exists at ${existing} and was left alone."
+        note "That is the retired CLI. Remove it with:  cargo uninstall neurax-cli"
+        note "Until then, start the application with:   neurax-desktop"
+        return
+    fi
+
+    ln -sf "${APP_DIR}/neurax-desktop" "${BIN_DIR}/neurax" 2>/dev/null \
+        || ln -sf "${BIN_DIR}/neurax-desktop" "${BIN_DIR}/neurax"
+}
+
+check_path() {
+    case ":${PATH}:" in
+        *":${BIN_DIR}:"*) return 0 ;;
+    esac
+
+    warn "${BIN_DIR} is not on your PATH."
+    say  "    Add it by running the line for your shell, then opening a new terminal:"
+    say  ""
+    say  "      bash:  echo 'export PATH=\"${BIN_DIR}:\$PATH\"' >> ~/.bashrc"
+    say  "      zsh:   echo 'export PATH=\"${BIN_DIR}:\$PATH\"' >> ~/.zshrc"
+    say  "      fish:  fish_add_path ${BIN_DIR}"
+}
+
+# ─── Uninstall ──────────────────────────────────────────────────────
+
+uninstall() {
+    step "Removing NEURAX"
+    removed=0
+    for path in "${BIN_DIR}/neurax-desktop" "${APP_DIR}" "${DESKTOP_ENTRY}" \
+                "${MAC_APP}" "${MAC_APP_USER}"; do
+        if [ -e "${path}" ] || [ -L "${path}" ]; then
+            rm -rf "${path}" && note "removed ${path}" && removed=1
+        fi
+    done
+
+    for size in 32 128 256; do
+        icon="${ICON_ROOT}/${size}x${size}/apps/neurax.png"
+        if [ -e "${icon}" ] || [ -L "${icon}" ]; then
+            rm -f "${icon}" && note "removed ${icon}" && removed=1
+        fi
+    done
+
+    # Only remove `neurax` if it is the symlink this script made. A CLI
+    # installed separately is not ours to delete.
+    if [ -L "${BIN_DIR}/neurax" ]; then
+        case "$(readlink "${BIN_DIR}/neurax")" in
+            *neurax-desktop) rm -f "${BIN_DIR}/neurax" && note "removed ${BIN_DIR}/neurax"; removed=1 ;;
+        esac
+    fi
+
+    [ "${removed}" -eq 1 ] || say "Nothing to remove."
+    say ""
+    say "Your NEURAX projects and settings were not touched."
+    exit 0
+}
+
+# ─── Banner ─────────────────────────────────────────────────────────
+
+# What NEURAX says for itself once it is installed.
+#
+# The line is not decoration. NEURAX computes parameters, FLOPs, VRAM,
+# latency, cost, energy and carbon from the architecture alone — before a
+# single GPU-hour is spent, and without a GPU to spend it on. That is the whole
+# proposition, and it fits on one line.
+banner() {
+    say ""
+    if [ -n "${BOLD}" ]; then
+        printf '%s' "${GOLD}"
+        say '   ███╗   ██╗███████╗██╗   ██╗██████╗  █████╗ ██╗  ██╗'
+        say '   ████╗  ██║██╔════╝██║   ██║██╔══██╗██╔══██╗╚██╗██╔╝'
+        say '   ██╔██╗ ██║█████╗  ██║   ██║██████╔╝███████║ ╚███╔╝ '
+        say '   ██║╚██╗██║██╔══╝  ██║   ██║██╔══██╗██╔══██║ ██╔██╗ '
+        say '   ██║ ╚████║███████╗╚██████╔╝██║  ██║██║  ██║██╔╝ ██╗'
+        say '   ╚═╝  ╚═══╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝'
+        printf '%s' "${RESET}"
+        say ""
+        printf '        %sEvery number before the first epoch.%s\n' "${BOLD}" "${RESET}"
+    else
+        # Piped into a log or a terminal without colour: the words, plainly.
+        say "NEURAX ${RELEASE_TAG}"
+        say "Every number before the first epoch."
+    fi
+    say ""
+    printf '   %sInstalled.%s  Analytical compiler for neural architectures.\n' \
+        "${GREEN}" "${RESET}"
+    say ""
+}
+
+# ─── Main ───────────────────────────────────────────────────────────
+
+detect_platform
+
+[ "${UNINSTALL}" -eq 1 ] && uninstall
+
+case "${PLATFORM}" in
+    linux) install_linux ;;
+    macos) install_macos ;;
+esac
+
+banner
+
+say "  neurax          open NEURAX"
+say ""
+note "The compiler runs inside the application, on your machine."
+note "No account, no upload, no network."
+say ""
+check_path
