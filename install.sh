@@ -151,6 +151,7 @@ resolve_release_quietly() {
         ASSET_URL=$(asset_url_from "${release_json}" "${suffix}")
         [ -n "${ASSET_URL}" ] || return 1
         RELEASE_TAG="${VERSION}"
+        SUMS_URL=$(asset_url_from "${release_json}" "SHA256SUMS.txt")
         return 0
     fi
 
@@ -170,11 +171,39 @@ resolve_release_quietly() {
         if [ -n "${url}" ]; then
             ASSET_URL="${url}"
             RELEASE_TAG="${tag}"
+            SUMS_URL=$(asset_url_from "${one}" "SHA256SUMS.txt")
             return 0
         fi
     done
 
     return 1
+}
+
+# Check a downloaded bundle against the release's SHA256SUMS.txt before it is
+# installed. Fails closed: a release without checksums, or a file that does
+# not match, is never installed — HTTPS says who served the file, not that it
+# is the file that was published.
+verify_download() {
+    file="$1"
+    name=$(basename "${ASSET_URL}")
+    [ -n "${SUMS_URL:-}" ] \
+        || die "release ${RELEASE_TAG} publishes no SHA256SUMS.txt, so ${name} cannot be verified. Not installing it."
+
+    expected=$(fetch "${SUMS_URL}" \
+        | awk -v n="${name}" '$2 == n || $2 == "*" n { print $1; exit }')
+    [ -n "${expected}" ] || die "SHA256SUMS.txt for ${RELEASE_TAG} has no entry for ${name}. Not installing it."
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "${file}" | awk '{ print $1 }')
+    elif command -v shasum >/dev/null 2>&1; then
+        actual=$(shasum -a 256 "${file}" | awk '{ print $1 }')
+    else
+        die "verifying the download needs \`sha256sum\` or \`shasum\`."
+    fi
+
+    [ "${actual}" = "${expected}" ] \
+        || die "${name} does not match its published SHA-256 checksum. Not installing it."
+    note "Checksum verified"
 }
 
 no_release_error() {
@@ -226,6 +255,7 @@ install_linux() {
 install_linux_appimage() {
     tmp="$1"
     fetch_to "${ASSET_URL}" "${tmp}/neurax.AppImage"
+    verify_download "${tmp}/neurax.AppImage"
     chmod +x "${tmp}/neurax.AppImage"
     # Moved into place last, so an interrupted download never leaves a broken
     # executable where a working one used to be.
@@ -243,6 +273,7 @@ install_linux_appimage() {
 install_linux_deb() {
     tmp="$1"
     fetch_to "${ASSET_URL}" "${tmp}/neurax.deb"
+    verify_download "${tmp}/neurax.deb"
 
     if command -v dpkg-deb >/dev/null 2>&1; then
         dpkg-deb -x "${tmp}/neurax.deb" "${tmp}/root"
@@ -258,6 +289,7 @@ install_linux_deb() {
 install_linux_rpm() {
     tmp="$1"
     fetch_to "${ASSET_URL}" "${tmp}/neurax.rpm"
+    verify_download "${tmp}/neurax.rpm"
 
     command -v rpm2cpio >/dev/null 2>&1 || die "unpacking an .rpm needs \`rpm2cpio\`."
     command -v cpio >/dev/null 2>&1 || die "unpacking an .rpm needs \`cpio\`."
@@ -355,6 +387,7 @@ install_macos() {
     trap "hdiutil detach '${mount_point}' -quiet 2>/dev/null || true; rm -rf '${tmp}'" EXIT INT TERM
 
     fetch_to "${ASSET_URL}" "${tmp}/neurax.dmg"
+    verify_download "${tmp}/neurax.dmg"
 
     mkdir -p "${mount_point}"
     hdiutil attach "${tmp}/neurax.dmg" -mountpoint "${mount_point}" -nobrowse -quiet \
@@ -510,6 +543,6 @@ banner
 say "  neurax          open NEURAX"
 say ""
 note "The compiler runs inside the application, on your machine."
-note "No account, no upload, no network."
+note "Sign in with your NEURAX account on first launch."
 say ""
 check_path
