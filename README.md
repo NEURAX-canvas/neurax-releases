@@ -41,7 +41,8 @@ so later launches go straight in.
 
 ## Problems
 
-Open an issue in this repository.
+Open an issue in this repository. For a security vulnerability, do not open a
+public issue — see [SECURITY.md](SECURITY.md).
 
 ---
 

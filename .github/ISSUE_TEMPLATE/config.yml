@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/NEURAX-canvas/neurax-releases/security/advisories/new
+    about: Privately, never in a public issue.
+  - name: NEURAX website
+    url: https://neuraxs.dev
+    about: Product information and your account.
