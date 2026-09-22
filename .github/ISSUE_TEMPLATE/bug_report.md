@@ -8,7 +8,7 @@ labels: bug
 
 **NEURAX version:** <!-- e.g. v0.20.1 -->
 **Operating system:** <!-- e.g. Ubuntu 24.04, macOS 15, Windows 11 -->
-**Installed with:** <!-- install.sh, .AppImage, .deb, .rpm, .dmg, .exe, .msi -->
+**Installed with:** <!-- .AppImage, .deb, .rpm, .dmg, .exe, .msi -->
 
 **What happened**
 

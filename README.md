@@ -9,20 +9,9 @@ This repository only hosts the installers. It contains no source code.
 
 ## Install
 
-**Linux and macOS**, one command:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/NEURAX-canvas/neurax-releases/main/install.sh | sh
-```
-
-It installs under `~/.local` (no sudo), adds NEURAX to your applications menu
-and makes `neurax` available in the shell.
-
-    curl -fsSL …/install.sh | sh -s -- --version v0.20.1   # a specific release
-    curl -fsSL …/install.sh | sh -s -- --uninstall         # remove it again
-
-**Windows**, or to install by hand, take a file from the
-[latest release](https://github.com/NEURAX-canvas/neurax-releases/releases/latest):
+Download the file for your platform from
+[neuraxs.dev/download](https://neuraxs.dev/download), or take one directly
+from the [latest release](https://github.com/NEURAX-canvas/neurax-releases/releases/latest):
 
 | Platform | File |
 |---|---|
