@@ -1,9 +1,6 @@
 # NEURAX — desktop downloads
 
-NEURAX analyses a neural network architecture before it is trained: parameters,
-FLOPs, memory, latency, cost, energy and carbon, across a database of
-accelerators. The desktop studio runs the whole compiler on your machine —
-your designs and data never leave it.
+NEURAX is a local studio for designing, analyzing, and training AI models. Its mission is to make every architecture decision measurable before execution: parameters, FLOPs, memory, time, cost, and hardware compatibility.
 
 This repository only hosts the installers. It contains no source code.
 
