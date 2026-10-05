@@ -351,12 +351,20 @@ ENTRY
 # the desktop shell. Install the same release artwork in the freedesktop icon
 # search path and use one stable name from the .desktop entry above.
 install_linux_icons() {
+    # The package carries its icons: copied from it, no download. An AppImage
+    # carries none outside itself, so its icons are fetched.
+    shipped="${APP_DIR}/files/usr/share/icons/hicolor"
     for size in 32 128 256; do
         dir="${ICON_ROOT}/${size}x${size}/apps"
         mkdir -p "${dir}"
+        from=$(find "${shipped}" -path "*/${size}x${size}*/apps/*.png" 2>/dev/null | head -n 1)
+        if [ -n "${from}" ]; then
+            cp -f "${from}" "${dir}/neurax.png"
+            continue
+        fi
         source="${size}x${size}.png"
         [ "${size}" = 256 ] && source="128x128@2x.png"
-        fetch_to "https://raw.githubusercontent.com/${REPO}/main/neurax-desktop/icons/${source}" "${dir}/neurax.png"
+        curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/neurax-desktop/icons/${source}" -o "${dir}/neurax.png" || true
     done
     if command -v gtk-update-icon-cache >/dev/null 2>&1; then
         gtk-update-icon-cache -f -t "${ICON_ROOT}" 2>/dev/null || true
@@ -429,6 +437,10 @@ install_macos() {
 # told, because otherwise the wrong one wins on PATH with no explanation.
 install_launcher() {
     existing=$(command -v neurax 2>/dev/null || true)
+    case "$(readlink "${existing}" 2>/dev/null || true)" in
+        *neurax-desktop|*/lib/neurax/*) existing="" ;;  # an earlier NEURAX install's launcher
+    esac
+    grep -q "installed by install.sh" "${existing:-/dev/null}" 2>/dev/null && existing=""
 
     if [ -n "${existing}" ] && [ "${existing}" != "${BIN_DIR}/neurax" ]; then
         warn "\`neurax\` already exists at ${existing} and was left alone."
@@ -437,8 +449,22 @@ install_launcher() {
         return
     fi
 
-    ln -sf "${APP_DIR}/neurax-desktop" "${BIN_DIR}/neurax" 2>/dev/null \
-        || ln -sf "${BIN_DIR}/neurax-desktop" "${BIN_DIR}/neurax"
+    # `neurax` opens the application and gives the terminal back at once: the
+    # application runs on its own, in its own session, so neither closing the
+    # terminal nor Ctrl+C in it touches the open studio. `neurax-desktop`
+    # stays the binary itself, in the foreground, for diagnosing.
+    rm -f "${BIN_DIR}/neurax"
+    cat > "${BIN_DIR}/neurax" <<LAUNCHER
+#!/bin/sh
+# Opens NEURAX on its own and returns the terminal (installed by install.sh).
+app="${BIN_DIR}/neurax-desktop"
+if command -v setsid >/dev/null 2>&1; then
+    setsid "\$app" "\$@" >/dev/null 2>&1 < /dev/null &
+else
+    nohup "\$app" "\$@" >/dev/null 2>&1 < /dev/null &
+fi
+LAUNCHER
+    chmod +x "${BIN_DIR}/neurax"
 }
 
 check_path() {
@@ -479,6 +505,8 @@ uninstall() {
         case "$(readlink "${BIN_DIR}/neurax")" in
             *neurax-desktop) rm -f "${BIN_DIR}/neurax" && note "removed ${BIN_DIR}/neurax"; removed=1 ;;
         esac
+    elif [ -f "${BIN_DIR}/neurax" ] && grep -q "installed by install.sh" "${BIN_DIR}/neurax" 2>/dev/null; then
+        rm -f "${BIN_DIR}/neurax" && note "removed ${BIN_DIR}/neurax"; removed=1
     fi
 
     [ "${removed}" -eq 1 ] || say "Nothing to remove."
