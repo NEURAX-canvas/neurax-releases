@@ -331,7 +331,7 @@ install_desktop_entry() {
 [Desktop Entry]
 Type=Application
 Name=NEURAX
-Comment=Analytical compiler for neural network architectures
+Comment=Studio for designing and training AI models
 Exec=${APP_DIR}/neurax-desktop
 TryExec=${APP_DIR}/neurax-desktop
 Icon=neurax
@@ -519,10 +519,7 @@ uninstall() {
 
 # What NEURAX says for itself once it is installed.
 #
-# The line is not decoration. NEURAX computes parameters, FLOPs, VRAM,
-# latency, cost, energy and carbon from the architecture alone — before a
-# single GPU-hour is spent, and without a GPU to spend it on. That is the whole
-# proposition, and it fits on one line.
+# Keep the message readable both in a colour terminal and in a plain log.
 banner() {
     say ""
     if [ -n "${BOLD}" ]; then
@@ -535,14 +532,19 @@ banner() {
         say '   ╚═╝  ╚═══╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝'
         printf '%s' "${RESET}"
         say ""
-        printf '        %sEvery number before the first epoch.%s\n' "${BOLD}" "${RESET}"
+        printf '        %s%sNEURAX is the Lovable of models.%s\n' "${BOLD}" "${YELLOW}" "${RESET}"
+        printf '        %sBuild your AI. Run it your way.%s\n' "${YELLOW}" "${RESET}"
+        printf '        %sMemory, speed and cost in milliseconds,%s\n' "${YELLOW}" "${RESET}"
+        printf '        %swithout a GPU, an account or a cluster.%s\n' "${YELLOW}" "${RESET}"
     else
         # Piped into a log or a terminal without colour: the words, plainly.
         say "NEURAX ${RELEASE_TAG}"
-        say "Every number before the first epoch."
+        say "NEURAX is the Lovable of models."
+        say "Build your AI. Run it your way."
+        say "Memory, speed and cost in milliseconds, without a GPU, an account or a cluster."
     fi
     say ""
-    printf '   %sInstalled.%s  Analytical compiler for neural architectures.\n' \
+    printf '   %sInstalled.%s  Your AI model studio is ready.\n' \
         "${GREEN}" "${RESET}"
     say ""
 }
@@ -562,7 +564,7 @@ banner
 
 say "  neurax          open NEURAX"
 say ""
-note "The compiler runs inside the application, on your machine: your designs and data stay on it."
-note "Sign in once when it opens; Neurax AI uses the provider key you give it."
+note "The studio runs on your machine: your designs and data stay on it."
+note "Use NEURAX offline or sign in; Neurax AI uses the provider key you give it."
 say ""
 check_path
